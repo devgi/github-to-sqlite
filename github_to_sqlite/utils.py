@@ -827,11 +827,23 @@ def fetch_workflows(token, full_name):
     response = requests.get(url, headers=headers)
     if response.status_code == 404:
         return {}
+    response.raise_for_status()
     workflows = {}
     for item in response.json():
-        name = item["name"]
-        content = requests.get(item["download_url"]).text
-        workflows[name] = content
+        if item.get("type") != "file":
+            continue
+        # Fetch via the authenticated contents API with the raw media type
+        # rather than the item's download_url: for private repos the token
+        # embedded in download_url is short-lived, so fetching it
+        # unauthenticated can return a "404: Not Found" body that would then
+        # be parsed as YAML. raise_for_status() ensures we never ingest an
+        # error page as workflow content.
+        content_response = requests.get(
+            item["url"],
+            headers={**headers, "Accept": "application/vnd.github.raw"},
+        )
+        content_response.raise_for_status()
+        workflows[item["name"]] = content_response.text
     return workflows
 
 
@@ -899,7 +911,12 @@ def save_workflow(db, repo_id, filename, content):
                         "job": job_id,
                         "repo": repo_id,
                     },
-                    **step,
+                    # A step's YAML `id:` is only unique within its job, so it
+                    # must not override the table's auto-incrementing `id`
+                    # primary key (that caused UNIQUE constraint failures when
+                    # the same step id appeared in two jobs/workflows). Store it
+                    # as `step_id` instead.
+                    **{("step_id" if k == "id" else k): v for k, v in step.items()},
                 }
                 for i, step in enumerate(steps)
             ],
